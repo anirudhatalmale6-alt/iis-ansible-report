@@ -78,10 +78,9 @@
 
   vars:
     report_dir: "/tmp/iis_report_workspace"
-    csv_filename: "{{ csv_filename | default('iis_report.csv') }}"
+    csv_filename: "iis_report.csv"
     report_file: "{{ report_dir }}/{{ csv_filename }}"
     csv_headers: "Server,Server IPs,Site Name,Site ID,Status,Protocol,Binding IP,Port,Host Header,Physical Path"
-    azure_repo_branch: "{{ azure_repo_branch | default('main') }}"
 
   tasks:
     - name: Ensure report directory exists
@@ -128,9 +127,9 @@
 
   vars:
     report_dir: "/tmp/iis_report_workspace"
-    csv_filename: "{{ csv_filename | default('iis_report.csv') }}"
+    csv_filename: "iis_report.csv"
     report_file: "{{ report_dir }}/{{ csv_filename }}"
-    azure_repo_branch: "{{ azure_repo_branch | default('main') }}"
+    azure_repo_branch: "main"
     azure_clone_dir: "/tmp/azure_iis_repo"
 
   tasks:
