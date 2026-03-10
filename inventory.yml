@@ -1,0 +1,43 @@
+---
+# Inventory file for IIS servers
+# Update the hosts below with your actual server details.
+#
+# Authentication options:
+#   - Basic auth: set ansible_user + ansible_password
+#   - Kerberos:   set ansible_winrm_transport=kerberos
+#   - CredSSP:    set ansible_winrm_transport=credssp
+#
+# For HTTPS WinRM (recommended):
+#   ansible_winrm_scheme: https
+#   ansible_winrm_server_cert_validation: ignore  (for self-signed certs)
+
+all:
+  children:
+    iis_servers:
+      hosts:
+        # --- Add your IIS servers here ---
+        # Example:
+        # web-server-01:
+        #   ansible_host: 192.168.1.10
+        # web-server-02:
+        #   ansible_host: 192.168.1.11
+
+        server1:
+          ansible_host: 192.168.1.10    # <-- Replace with actual IP or FQDN
+        server2:
+          ansible_host: 192.168.1.11    # <-- Replace with actual IP or FQDN
+
+      vars:
+        ansible_connection: winrm
+        ansible_winrm_transport: ntlm          # Change to kerberos/credssp if needed
+        ansible_winrm_scheme: https             # Use 'http' if WinRM HTTPS is not configured
+        ansible_port: 5986                      # Use 5985 for HTTP
+        ansible_winrm_server_cert_validation: ignore  # Remove in production with valid certs
+
+        # --- Credentials ---
+        ansible_user: administrator             # <-- Replace with your Windows username
+        ansible_password: YourPasswordHere      # <-- Replace with your password
+        # Tip: Use ansible-vault to encrypt passwords:
+        #   ansible_password: !vault |
+        #     $ANSIBLE_VAULT;1.1;AES256
+        #     ...

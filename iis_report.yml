@@ -1,0 +1,149 @@
+---
+# Ansible Playbook: IIS Website & Binding Report
+# Connects to Windows servers via WinRM, queries IIS, and generates a CSV report.
+#
+# Usage:
+#   ansible-playbook -i inventory.yml iis_report.yml
+#
+# Requirements:
+#   - WinRM configured on target Windows servers
+#   - IIS installed on target servers
+#   - ansible.windows collection installed (ansible-galaxy collection install ansible.windows)
+
+- name: Gather IIS website and binding information
+  hosts: iis_servers
+  gather_facts: false
+
+  tasks:
+    - name: Gather Windows hostname and IP addresses
+      ansible.windows.win_powershell:
+        script: |
+          $hostname = $env:COMPUTERNAME
+          $ips = (Get-NetIPAddress -AddressFamily IPv4 |
+                  Where-Object { $_.IPAddress -ne '127.0.0.1' -and $_.PrefixOrigin -ne 'WellKnown' } |
+                  Select-Object -ExpandProperty IPAddress) -join ';'
+          [PSCustomObject]@{
+            Hostname = $hostname
+            IPs      = $ips
+          } | ConvertTo-Json
+      register: server_info_raw
+
+    - name: Parse server info
+      ansible.builtin.set_fact:
+        server_info: "{{ server_info_raw.output[0] | from_json }}"
+
+    - name: Gather IIS site and binding details
+      ansible.windows.win_powershell:
+        script: |
+          Import-Module WebAdministration
+
+          $sites = Get-ChildItem IIS:\Sites
+          $results = @()
+
+          foreach ($site in $sites) {
+              $bindings = Get-WebBinding -Name $site.Name
+              if ($bindings.Count -eq 0) {
+                  # Site with no bindings — still include it
+                  $results += [PSCustomObject]@{
+                      SiteName     = $site.Name
+                      SiteID       = $site.ID
+                      State        = $site.State
+                      Protocol     = ''
+                      BindingIP    = ''
+                      Port         = ''
+                      HostHeader   = ''
+                      PhysicalPath = $site.PhysicalPath
+                  }
+              }
+              else {
+                  foreach ($binding in $bindings) {
+                      $info = $binding.bindingInformation -split ':'
+                      $bindIP   = if ($info[0] -eq '*') { 'All Unassigned' } else { $info[0] }
+                      $port     = $info[1]
+                      $hostHdr  = $info[2]
+
+                      $results += [PSCustomObject]@{
+                          SiteName     = $site.Name
+                          SiteID       = $site.ID
+                          State        = $site.State
+                          Protocol     = $binding.protocol
+                          BindingIP    = $bindIP
+                          Port         = $port
+                          HostHeader   = $hostHdr
+                          PhysicalPath = $site.PhysicalPath
+                      }
+                  }
+              }
+          }
+
+          $results | ConvertTo-Json -Depth 3
+      register: iis_data_raw
+
+    - name: Parse IIS data
+      ansible.builtin.set_fact:
+        iis_sites: "{{ iis_data_raw.output[0] | from_json | default([]) }}"
+
+    - name: Normalize single-object result to list
+      ansible.builtin.set_fact:
+        iis_sites: "{{ [iis_sites] if iis_sites is mapping else iis_sites }}"
+
+    - name: Build per-host report rows
+      ansible.builtin.set_fact:
+        host_rows: >-
+          {%- set rows = [] -%}
+          {%- for site in iis_sites -%}
+            {%- set _ = rows.append({
+              'Server': server_info.Hostname,
+              'ServerIPs': server_info.IPs,
+              'SiteName': site.SiteName,
+              'SiteID': site.SiteID | string,
+              'Status': site.State | default('Unknown'),
+              'Protocol': site.Protocol | default(''),
+              'BindingIP': site.BindingIP | default(''),
+              'Port': site.Port | default(''),
+              'HostHeader': site.HostHeader | default(''),
+              'PhysicalPath': site.PhysicalPath | default('')
+            }) -%}
+          {%- endfor -%}
+          {{ rows }}
+
+- name: Generate CSV report
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    report_file: "./iis_report_{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}.csv"
+    csv_headers: "Server,Server IPs,Site Name,Site ID,Status,Protocol,Binding IP,Port,Host Header,Physical Path"
+
+  tasks:
+    - name: Collect all host rows
+      ansible.builtin.set_fact:
+        all_rows: >-
+          {%- set combined = [] -%}
+          {%- for host in groups['iis_servers'] -%}
+            {%- for row in hostvars[host]['host_rows'] | default([]) -%}
+              {%- set _ = combined.append(row) -%}
+            {%- endfor -%}
+          {%- endfor -%}
+          {{ combined }}
+
+    - name: Write CSV header
+      ansible.builtin.copy:
+        content: "{{ csv_headers }}\n"
+        dest: "{{ report_file }}"
+        mode: '0644'
+
+    - name: Append data rows to CSV
+      ansible.builtin.lineinfile:
+        path: "{{ report_file }}"
+        line: >-
+          "{{ item.Server }}","{{ item.ServerIPs }}","{{ item.SiteName }}","{{ item.SiteID }}","{{ item.Status }}","{{ item.Protocol }}","{{ item.BindingIP }}","{{ item.Port }}","{{ item.HostHeader }}","{{ item.PhysicalPath }}"
+        insertafter: EOF
+      loop: "{{ all_rows }}"
+      loop_control:
+        label: "{{ item.Server }} - {{ item.SiteName }}"
+
+    - name: Display report location
+      ansible.builtin.debug:
+        msg: "CSV report generated: {{ report_file }} ({{ all_rows | length }} rows from {{ groups['iis_servers'] | length }} server(s))"
