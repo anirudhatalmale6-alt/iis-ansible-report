@@ -15,7 +15,7 @@
 # Requirements:
 #   - WinRM configured on target Windows servers
 #   - IIS installed on target servers
-#   - ansible.windows collection installed (ansible-galaxy collection install ansible.windows)
+#   - No additional Ansible collections required (uses built-in win_shell module)
 #   - git installed on the Ansible controller
 
 - name: Gather IIS website and binding information
@@ -24,72 +24,69 @@
 
   tasks:
     - name: Gather Windows hostname and IP addresses
-      ansible.windows.win_powershell:
-        script: |
-          $hostname = $env:COMPUTERNAME
-          $ips = (Get-NetIPAddress -AddressFamily IPv4 |
-                  Where-Object { $_.IPAddress -ne '127.0.0.1' -and $_.PrefixOrigin -ne 'WellKnown' } |
-                  Select-Object -ExpandProperty IPAddress) -join ';'
-          [PSCustomObject]@{
-            Hostname = $hostname
-            IPs      = $ips
-          } | ConvertTo-Json
+      win_shell: |
+        $hostname = $env:COMPUTERNAME
+        $ips = (Get-NetIPAddress -AddressFamily IPv4 |
+                Where-Object { $_.IPAddress -ne '127.0.0.1' -and $_.PrefixOrigin -ne 'WellKnown' } |
+                Select-Object -ExpandProperty IPAddress) -join ';'
+        [PSCustomObject]@{
+          Hostname = $hostname
+          IPs      = $ips
+        } | ConvertTo-Json -Compress
       register: server_info_raw
 
     - name: Parse server info
       ansible.builtin.set_fact:
-        server_info: "{{ server_info_raw.output[0] | from_json }}"
+        server_info: "{{ server_info_raw.stdout | from_json }}"
 
     - name: Gather IIS site and binding details
-      ansible.windows.win_powershell:
-        script: |
-          Import-Module WebAdministration
+      win_shell: |
+        Import-Module WebAdministration
 
-          $sites = Get-ChildItem IIS:\Sites
-          $results = @()
+        $sites = Get-ChildItem IIS:\Sites
+        $results = @()
 
-          foreach ($site in $sites) {
-              $bindings = Get-WebBinding -Name $site.Name
-              if ($bindings.Count -eq 0) {
-                  # Site with no bindings — still include it
-                  $results += [PSCustomObject]@{
-                      SiteName     = $site.Name
-                      SiteID       = $site.ID
-                      State        = $site.State
-                      Protocol     = ''
-                      BindingIP    = ''
-                      Port         = ''
-                      HostHeader   = ''
-                      PhysicalPath = $site.PhysicalPath
-                  }
-              }
-              else {
-                  foreach ($binding in $bindings) {
-                      $info = $binding.bindingInformation -split ':'
-                      $bindIP   = if ($info[0] -eq '*') { 'All Unassigned' } else { $info[0] }
-                      $port     = $info[1]
-                      $hostHdr  = $info[2]
+        foreach ($site in $sites) {
+            $bindings = Get-WebBinding -Name $site.Name
+            if ($bindings.Count -eq 0) {
+                $results += [PSCustomObject]@{
+                    SiteName     = $site.Name
+                    SiteID       = $site.ID
+                    State        = $site.State
+                    Protocol     = ''
+                    BindingIP    = ''
+                    Port         = ''
+                    HostHeader   = ''
+                    PhysicalPath = $site.PhysicalPath
+                }
+            }
+            else {
+                foreach ($binding in $bindings) {
+                    $info = $binding.bindingInformation -split ':'
+                    $bindIP   = if ($info[0] -eq '*') { 'All Unassigned' } else { $info[0] }
+                    $port     = $info[1]
+                    $hostHdr  = $info[2]
 
-                      $results += [PSCustomObject]@{
-                          SiteName     = $site.Name
-                          SiteID       = $site.ID
-                          State        = $site.State
-                          Protocol     = $binding.protocol
-                          BindingIP    = $bindIP
-                          Port         = $port
-                          HostHeader   = $hostHdr
-                          PhysicalPath = $site.PhysicalPath
-                      }
-                  }
-              }
-          }
+                    $results += [PSCustomObject]@{
+                        SiteName     = $site.Name
+                        SiteID       = $site.ID
+                        State        = $site.State
+                        Protocol     = $binding.protocol
+                        BindingIP    = $bindIP
+                        Port         = $port
+                        HostHeader   = $hostHdr
+                        PhysicalPath = $site.PhysicalPath
+                    }
+                }
+            }
+        }
 
-          $results | ConvertTo-Json -Depth 3
+        $results | ConvertTo-Json -Depth 3 -Compress
       register: iis_data_raw
 
     - name: Parse IIS data
       ansible.builtin.set_fact:
-        iis_sites: "{{ iis_data_raw.output[0] | from_json | default([]) }}"
+        iis_sites: "{{ iis_data_raw.stdout | from_json | default([]) }}"
 
     - name: Normalize single-object result to list
       ansible.builtin.set_fact:
@@ -128,6 +125,12 @@
     azure_repo_branch: "{{ azure_repo_branch | default('main') }}"
 
   tasks:
+    - name: Ensure report directory exists
+      ansible.builtin.file:
+        path: "{{ report_dir }}"
+        state: directory
+        mode: '0755'
+
     - name: Collect all host rows
       ansible.builtin.set_fact:
         all_rows: >-
