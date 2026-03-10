@@ -1,14 +1,22 @@
 ---
 # Ansible Playbook: IIS Website & Binding Report
-# Connects to Windows servers via WinRM, queries IIS, and generates a CSV report.
+# Connects to Windows servers via WinRM, queries IIS, generates a CSV report,
+# and pushes the report to an Azure DevOps Git repository.
 #
 # Usage:
 #   ansible-playbook -i inventory.yml iis_report.yml
+#
+# Required variables (set in inventory.yml or passed via --extra-vars):
+#   azure_pat          - Azure DevOps Personal Access Token
+#   azure_repo_url     - Azure DevOps repo URL (e.g. https://dev.azure.com/org/project/_git/repo)
+#   azure_repo_branch  - Branch to push to (default: main)
+#   csv_filename       - Name of the CSV file in the repo (default: iis_report.csv)
 #
 # Requirements:
 #   - WinRM configured on target Windows servers
 #   - IIS installed on target servers
 #   - ansible.windows collection installed (ansible-galaxy collection install ansible.windows)
+#   - git installed on the Ansible controller
 
 - name: Gather IIS website and binding information
   hosts: iis_servers
@@ -113,8 +121,11 @@
   gather_facts: false
 
   vars:
-    report_file: "./iis_report_{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}.csv"
+    report_dir: "/tmp/iis_report_workspace"
+    csv_filename: "{{ csv_filename | default('iis_report.csv') }}"
+    report_file: "{{ report_dir }}/{{ csv_filename }}"
     csv_headers: "Server,Server IPs,Site Name,Site ID,Status,Protocol,Binding IP,Port,Host Header,Physical Path"
+    azure_repo_branch: "{{ azure_repo_branch | default('main') }}"
 
   tasks:
     - name: Collect all host rows
@@ -144,6 +155,91 @@
       loop_control:
         label: "{{ item.Server }} - {{ item.SiteName }}"
 
-    - name: Display report location
+    - name: Display report summary
       ansible.builtin.debug:
         msg: "CSV report generated: {{ report_file }} ({{ all_rows | length }} rows from {{ groups['iis_servers'] | length }} server(s))"
+
+- name: Push CSV report to Azure DevOps Repo
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    report_dir: "/tmp/iis_report_workspace"
+    csv_filename: "{{ csv_filename | default('iis_report.csv') }}"
+    report_file: "{{ report_dir }}/{{ csv_filename }}"
+    azure_repo_branch: "{{ azure_repo_branch | default('main') }}"
+    azure_clone_dir: "/tmp/azure_iis_repo"
+
+  tasks:
+    - name: Validate Azure DevOps variables
+      ansible.builtin.assert:
+        that:
+          - azure_pat is defined and azure_pat | length > 0
+          - azure_repo_url is defined and azure_repo_url | length > 0
+        fail_msg: >
+          Missing required variables. Please set 'azure_pat' and 'azure_repo_url'
+          in inventory.yml or pass via --extra-vars.
+
+    - name: Build authenticated Azure repo URL
+      ansible.builtin.set_fact:
+        azure_auth_url: "{{ azure_repo_url | regex_replace('https://', 'https://pat:' + azure_pat + '@') }}"
+
+    - name: Remove previous clone directory if it exists
+      ansible.builtin.file:
+        path: "{{ azure_clone_dir }}"
+        state: absent
+
+    - name: Clone Azure DevOps repository
+      ansible.builtin.git:
+        repo: "{{ azure_auth_url }}"
+        dest: "{{ azure_clone_dir }}"
+        version: "{{ azure_repo_branch }}"
+        force: true
+      environment:
+        GIT_TERMINAL_PROMPT: "0"
+
+    - name: Copy CSV report into the cloned repo
+      ansible.builtin.copy:
+        src: "{{ report_file }}"
+        dest: "{{ azure_clone_dir }}/{{ csv_filename }}"
+        mode: '0644'
+
+    - name: Configure git user for commit
+      ansible.builtin.shell: |
+        cd "{{ azure_clone_dir }}"
+        git config user.email "ansible@automation.local"
+        git config user.name "Ansible IIS Reporter"
+      changed_when: false
+
+    - name: Stage, commit, and push CSV to Azure DevOps
+      ansible.builtin.shell: |
+        cd "{{ azure_clone_dir }}"
+        git add "{{ csv_filename }}"
+
+        # Check if there are changes to commit
+        if git diff --cached --quiet; then
+          echo "NO_CHANGES"
+        else
+          git commit -m "Update IIS report - $(date '+%Y-%m-%d %H:%M:%S')"
+          git push origin "{{ azure_repo_branch }}"
+          echo "PUSHED"
+        fi
+      register: git_push_result
+      changed_when: "'PUSHED' in git_push_result.stdout"
+      environment:
+        GIT_TERMINAL_PROMPT: "0"
+
+    - name: Display push result
+      ansible.builtin.debug:
+        msg: >-
+          {% if 'PUSHED' in git_push_result.stdout %}
+          CSV report successfully pushed to Azure DevOps: {{ azure_repo_url }} (branch: {{ azure_repo_branch }})
+          {% else %}
+          No changes detected — CSV in Azure repo is already up to date.
+          {% endif %}
+
+    - name: Clean up clone directory
+      ansible.builtin.file:
+        path: "{{ azure_clone_dir }}"
+        state: absent

@@ -41,3 +41,16 @@ all:
         #   ansible_password: !vault |
         #     $ANSIBLE_VAULT;1.1;AES256
         #     ...
+
+  vars:
+    # --- Azure DevOps Repo Settings ---
+    # The CSV report will be committed and pushed to this repo.
+    azure_repo_url: "https://dev.azure.com/YOUR_ORG/YOUR_PROJECT/_git/YOUR_REPO"  # <-- Replace
+    azure_pat: "YOUR_PAT_TOKEN_HERE"                                                # <-- Replace
+    azure_repo_branch: "main"                   # Branch to push to
+    csv_filename: "iis_report.csv"              # Filename in the repo
+
+    # Tip: Encrypt the PAT with ansible-vault:
+    #   azure_pat: !vault |
+    #     $ANSIBLE_VAULT;1.1;AES256
+    #     ...
