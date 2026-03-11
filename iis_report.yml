@@ -54,14 +54,24 @@
       ansible.builtin.set_fact:
         iis_sites: "{{ [iis_sites] if iis_sites is mapping else iis_sites }}"
 
+    - name: Normalize server IPs to list
+      ansible.builtin.set_fact:
+        server_ip_list: >-
+          {%- if server_info.IPs is string -%}
+            {{ [server_info.IPs] }}
+          {%- elif server_info.IPs is iterable -%}
+            {{ server_info.IPs | list }}
+          {%- else -%}
+            {{ [] }}
+          {%- endif -%}
+
     - name: Build per-host report rows
       ansible.builtin.set_fact:
         host_rows: >-
           {%- set rows = [] -%}
           {%- for site in iis_sites -%}
-            {%- set _ = rows.append({
+            {%- set row = {
               'Server': server_info.Hostname,
-              'ServerIPs': server_info.IPs,
               'SiteName': site.SiteName,
               'SiteID': site.SiteID | string,
               'Status': site.State | default('Unknown'),
@@ -70,7 +80,12 @@
               'Port': site.Port | default(''),
               'HostHeader': site.HostHeader | default(''),
               'PhysicalPath': site.PhysicalPath | default('')
-            }) -%}
+            } -%}
+            {%- for ip in server_ip_list -%}
+              {%- set _ = row.update({'prod_ip_' + (loop.index | string): ip}) -%}
+            {%- endfor -%}
+            {%- set _ = row.update({'_ip_count': server_ip_list | length}) -%}
+            {%- set _ = rows.append(row) -%}
           {%- endfor -%}
           {{ rows }}
 
@@ -83,7 +98,6 @@
     report_dir: "/tmp/iis_report_workspace"
     csv_filename: "iis_report.csv"
     report_file: "{{ report_dir }}/{{ csv_filename }}"
-    csv_headers: "Server,Server IPs,Site Name,Site ID,Status,Protocol,Binding IP,Port,Host Header,Physical Path"
 
   tasks:
     - name: Ensure report directory exists
@@ -103,17 +117,36 @@
           {%- endfor -%}
           {{ combined }}
 
+    - name: Determine maximum number of IPs across all servers
+      ansible.builtin.set_fact:
+        max_ip_count: >-
+          {%- set counts = [] -%}
+          {%- for row in all_rows -%}
+            {%- set _ = counts.append(row._ip_count | int) -%}
+          {%- endfor -%}
+          {{ counts | max | default(0) }}
+
+    - name: Build dynamic CSV headers
+      ansible.builtin.set_fact:
+        csv_headers: >-
+          {%- set headers = ['Server'] -%}
+          {%- for i in range(1, (max_ip_count | int) + 1) -%}
+            {%- set _ = headers.append('prod_ip_' + (i | string)) -%}
+          {%- endfor -%}
+          {%- set _ = headers.extend(['Site Name', 'Site ID', 'Status', 'Protocol', 'Binding IP', 'Port', 'Host Header', 'Physical Path']) -%}
+          {{ headers | join(',') }}
+
     - name: Write CSV header
       ansible.builtin.copy:
         content: "{{ csv_headers }}\n"
         dest: "{{ report_file }}"
         mode: '0644'
 
-    - name: Append data rows to CSV
+    - name: Build and write CSV data rows
       ansible.builtin.lineinfile:
         path: "{{ report_file }}"
         line: >-
-          "{{ item.Server }}","{{ item.ServerIPs }}","{{ item.SiteName }}","{{ item.SiteID }}","{{ item.Status }}","{{ item.Protocol }}","{{ item.BindingIP }}","{{ item.Port }}","{{ item.HostHeader }}","{{ item.PhysicalPath }}"
+          "{{ item.Server }}"{% for i in range(1, (max_ip_count | int) + 1) %},"{{ item['prod_ip_' + (i | string)] | default('') }}"{% endfor %},"{{ item.SiteName }}","{{ item.SiteID }}","{{ item.Status }}","{{ item.Protocol }}","{{ item.BindingIP }}","{{ item.Port }}","{{ item.HostHeader }}","{{ item.PhysicalPath }}"
         insertafter: EOF
       loop: "{{ all_rows }}"
       loop_control:
@@ -121,7 +154,7 @@
 
     - name: Display report summary
       ansible.builtin.debug:
-        msg: "CSV report generated: {{ report_file }} ({{ all_rows | length }} rows from {{ groups['iis_servers'] | length }} server(s))"
+        msg: "CSV report generated: {{ report_file }} ({{ all_rows | length }} rows, {{ max_ip_count }} IP columns, from {{ groups['iis_servers'] | length }} server(s))"
 
 - name: Push CSV report to Azure DevOps Repo
   hosts: localhost
